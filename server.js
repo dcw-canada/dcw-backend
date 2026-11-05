@@ -1,30 +1,13 @@
 const fastify = require('fastify')({ logger: true });
 const mongoose = require('mongoose');
 require('dotenv').config();
+const Service = require('./models/Service');
+const Inquiry = require('./models/Inquiry');
 
 // Enable CORS for the Next.js frontend
-fastify.register(require('fastify-cors'), { 
+fastify.register(require('@fastify/cors'), { 
   origin: '*' // In production, change this to your actual frontend URL
 });
-
-// MongoDB Connection
-mongoose.connect(process.env.MONGO_URI)
-  .then(() => console.log('MongoDB Connected'))
-  .catch(err => console.log(err));
-
-// --- MODELS ---
-const Service = mongoose.model('Service', new mongoose.Schema({
-  title: String,
-  description: String,
-  image: String
-}));
-
-const Inquiry = mongoose.model('Inquiry', new mongoose.Schema({
-  name: String,
-  email: String,
-  message: String,
-  createdAt: { type: Date, default: Date.now }
-}));
 
 // --- ROUTES ---
 
@@ -57,6 +40,12 @@ fastify.get('/api/inquiries', async (request, reply) => {
 // Start Server
 const start = async () => {
   try {
+    if (!process.env.MONGO_URI) {
+      throw new Error('MONGO_URI is not set in the .env file');
+    }
+
+    await mongoose.connect(process.env.MONGO_URI);
+    fastify.log.info('MongoDB Connected');
     await fastify.listen({ port: process.env.PORT || 5000 });
     console.log(`Server running on port ${process.env.PORT || 5000}`);
   } catch (err) {
