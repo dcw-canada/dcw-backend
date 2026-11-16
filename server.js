@@ -1,7 +1,10 @@
 const fastify = require("fastify")({ logger: true });
 const mongoose = require("mongoose");
+const path = require("path");
+const fs = require("fs");
 require("dotenv").config();
 const multipart = require("@fastify/multipart");
+const { v2: cloudinary } = require("cloudinary");
 
 const Service = require("./models/Service");
 const Inquiry = require("./models/Inquiry");
@@ -9,7 +12,29 @@ const Quote = require("./models/Quote");
 const Partner = require("./models/Partner");
 const RateSheet = require("./models/RateSheet");
 const Booking = require("./models/Booking"); // NEW
+const Blog = require("./models/Blog");
+const { seedBlogsIfEmpty } = require("./seedBlogs");
 const { parseRateSheet } = require("./lib/parseRateSheet");
+
+// Cloudinary Configuration
+if (process.env.CLOUDINARY_CLOUD_NAME) {
+  cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET,
+  });
+}
+
+// Local Uploads Folder & Static Serving
+const uploadDir = path.join(__dirname, "uploads");
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+fastify.register(require("@fastify/static"), {
+  root: uploadDir,
+  prefix: "/uploads/",
+});
 
 // --- CORS CONFIGURATION ---
 const allowedOrigins = process.env.CORS_ORIGINS
@@ -416,6 +441,194 @@ fastify.delete("/api/bookings/:id", async (request, reply) => {
   return { success: true };
 });
 
+// ============================================================
+// --- BLOGS & ARTICLES ---
+// ============================================================
+
+const getBlogsHandler = async (request, reply) => {
+  try {
+    const { category } = request.query || {};
+    const filter = category && category !== "all" ? { category } : {};
+    const blogs = await Blog.find(filter).sort({ createdAt: -1 });
+    return reply.send({ success: true, data: blogs });
+  } catch (err) {
+    return reply.code(500).send({ success: false, message: err.message });
+  }
+};
+
+const getBlogBySlugHandler = async (request, reply) => {
+  try {
+    const blog = await Blog.findOne({ slug: request.params.slug });
+    if (!blog) {
+      return reply.code(404).send({ success: false, message: "Blog not found" });
+    }
+    return reply.send({ success: true, data: blog });
+  } catch (err) {
+    return reply.code(500).send({ success: false, message: err.message });
+  }
+};
+
+const getAdminBlogsHandler = async (request, reply) => {
+  try {
+    const blogs = await Blog.find({}).sort({ createdAt: -1 });
+    return reply.send({ success: true, data: blogs });
+  } catch (err) {
+    return reply.code(500).send({ success: false, message: err.message });
+  }
+};
+
+const getAdminBlogByIdHandler = async (request, reply) => {
+  try {
+    const blog = await Blog.findById(request.params.id);
+    if (!blog) {
+      return reply.code(404).send({ success: false, message: "Blog not found" });
+    }
+    return reply.send({ success: true, data: blog });
+  } catch (err) {
+    return reply.code(500).send({ success: false, message: err.message });
+  }
+};
+
+const createBlogHandler = async (request, reply) => {
+  try {
+    const blogData = request.body || {};
+    if (!blogData.slug && blogData.title) {
+      blogData.slug = blogData.title
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/(^-|-$)/g, "");
+    }
+    const blog = new Blog(blogData);
+    await blog.save();
+    return reply.code(201).send({ success: true, data: blog, message: "Blog created successfully" });
+  } catch (err) {
+    return reply.code(500).send({ success: false, message: err.message });
+  }
+};
+
+const updateBlogHandler = async (request, reply) => {
+  try {
+    const blogData = request.body || {};
+    if (!blogData.slug && blogData.title) {
+      blogData.slug = blogData.title
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/(^-|-$)/g, "");
+    }
+    const blog = await Blog.findByIdAndUpdate(
+      request.params.id,
+      { ...blogData, updatedAt: new Date() },
+      { new: true, runValidators: true }
+    );
+    if (!blog) {
+      return reply.code(404).send({ success: false, message: "Blog not found" });
+    }
+    return reply.send({ success: true, data: blog, message: "Blog updated successfully" });
+  } catch (err) {
+    return reply.code(500).send({ success: false, message: err.message });
+  }
+};
+
+const deleteBlogHandler = async (request, reply) => {
+  try {
+    const blog = await Blog.findByIdAndDelete(request.params.id);
+    if (!blog) {
+      return reply.code(404).send({ success: false, message: "Blog not found" });
+    }
+    return reply.send({ success: true, message: "Blog deleted successfully" });
+  } catch (err) {
+    return reply.code(500).send({ success: false, message: err.message });
+  }
+};
+
+const uploadImageHandler = async (request, reply) => {
+  try {
+    const data = await request.file();
+    if (!data) {
+      return reply.code(400).send({ success: false, message: "No file uploaded" });
+    }
+
+    const chunks = [];
+    for await (const chunk of data.file) {
+      chunks.push(chunk);
+    }
+    const buffer = Buffer.concat(chunks);
+
+    // Try Cloudinary first if configured
+    if (process.env.CLOUDINARY_CLOUD_NAME && process.env.CLOUDINARY_API_KEY) {
+      try {
+        const cloudinaryResult = await new Promise((resolve, reject) => {
+          cloudinary.uploader
+            .upload_stream(
+              {
+                folder: "dcw-blog-images",
+                resource_type: "image",
+                access_mode: "public",
+                invalidate: true,
+              },
+              (error, result) => {
+                if (error) reject(error);
+                else resolve(result);
+              }
+            )
+            .end(buffer);
+        });
+
+        if (cloudinaryResult && cloudinaryResult.secure_url) {
+          return reply.send({
+            success: true,
+            url: cloudinaryResult.secure_url,
+            message: "Image uploaded successfully",
+          });
+        }
+      } catch (cloudErr) {
+        fastify.log.warn("Cloudinary upload failed, falling back to local storage: " + cloudErr.message);
+      }
+    }
+
+    // Local file fallback
+    const ext = path.extname(data.filename) || ".jpg";
+    const filename = `blog_${Date.now()}_${Math.floor(Math.random() * 100000)}${ext}`;
+    const filePath = path.join(uploadDir, filename);
+    await fs.promises.writeFile(filePath, buffer);
+
+    const protocol = request.protocol || "http";
+    const host = request.headers.host || `localhost:${process.env.PORT || 5000}`;
+    const fileUrl = `${protocol}://${host}/uploads/${filename}`;
+
+    return reply.send({
+      success: true,
+      url: fileUrl,
+      message: "Image uploaded successfully",
+    });
+  } catch (err) {
+    fastify.log.error(err);
+    return reply.code(500).send({ success: false, message: err.message });
+  }
+};
+
+// Public Blog Routes
+fastify.get("/api/blogs", getBlogsHandler);
+fastify.get("/blogs", getBlogsHandler);
+fastify.get("/api/blogs/:slug", getBlogBySlugHandler);
+fastify.get("/blogs/:slug", getBlogBySlugHandler);
+
+// Admin Blog CRUD Routes (Both /admin/... and /api/admin/... for total compatibility)
+fastify.get("/api/admin/blogs", getAdminBlogsHandler);
+fastify.get("/admin/blogs", getAdminBlogsHandler);
+fastify.get("/api/admin/blogs/:id", getAdminBlogByIdHandler);
+fastify.get("/admin/blogs/:id", getAdminBlogByIdHandler);
+fastify.post("/api/admin/blogs", createBlogHandler);
+fastify.post("/admin/blogs", createBlogHandler);
+fastify.put("/api/admin/blogs/:id", updateBlogHandler);
+fastify.put("/admin/blogs/:id", updateBlogHandler);
+fastify.delete("/api/admin/blogs/:id", deleteBlogHandler);
+fastify.delete("/admin/blogs/:id", deleteBlogHandler);
+
+// Admin Image Upload
+fastify.post("/api/admin/upload-image", uploadImageHandler);
+fastify.post("/admin/upload-image", uploadImageHandler);
+
 // --- START SERVER ---
 const start = async () => {
   try {
@@ -423,6 +636,10 @@ const start = async () => {
       throw new Error("MONGO_URI is not set in the .env file");
     await mongoose.connect(process.env.MONGO_URI);
     fastify.log.info("MongoDB Connected");
+
+    // Seed initial blogs if collection is empty
+    await seedBlogsIfEmpty();
+
     await fastify.listen({ port: process.env.PORT || 5000, host: "0.0.0.0" });
     console.log(`Server running on port ${process.env.PORT || 5000}`);
   } catch (err) {
